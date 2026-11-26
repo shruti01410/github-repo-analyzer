@@ -22,6 +22,28 @@ analyzer.py       Prompt building, truncation, Groq call, JSON normalisation
 tests/            Unit tests (parser, error handling, truncation, normalisation)
 ```
 
+## Architecture
+```
+ user input ──► parse_repo() ──► GitHubClient.fetch_repo() ──► RepoData
+                (regex)          (requests, GitHub REST v3)     (dataclass)
+                                                                   │
+        Streamlit dashboard ◄── normalize() ◄── Groq LLM ◄── build_prompt()
+        (cards, charts, tabs)   (fixed schema)  (JSON mode)  (truncated context)
+```
+The three layers are kept separate on purpose: `github_client.py` knows nothing about
+the UI or the LLM, `analyzer.py` only sees the `RepoData` dataclass, and `app.py` only
+deals with presentation and turning exceptions into messages. That makes each layer
+testable on its own (the tests mock HTTP responses; no network or API key needed).
+
+## Model choice
+Groq's free tier is fast (a full report takes about 5 seconds), and its OpenAI-compatible API supports
+**JSON mode**, which the dashboard relies on to render each section separately.
+The default model is `openai/gpt-oss-120b`: it follows the output schema reliably and has a
+131k context window, so the truncated prompt fits with lots of headroom. It runs with
+`reasoning_effort="low"` to keep latency down. The model is set by the `GROQ_MODEL` setting:
+the first model I used (`llama-3.3-70b-versatile`) was retired by Groq during development,
+so I made it configurable rather than hard-coded.
+
 ## API flow
 1. `parse_repo()` extracts `owner`/`repo` with a regex (also accepts `.git` suffixes and deep links like `/tree/main/src`).
 2. `GitHubClient.fetch_repo()` calls:
@@ -60,6 +82,19 @@ Unauthenticated: **60 requests/hour** per IP. With a personal access token:
 **5,000 requests/hour**. One analysis uses roughly 6–10 requests. The remaining quota is
 shown under the stat cards. Users can paste a token in the sidebar (it is only kept
 in memory for the session); a server-side `GITHUB_TOKEN` secret is used as a fallback.
+
+## Limitations
+- **Static view only:** the AI sees the README, the first 200 file paths and package files,
+  not the source code itself, so it judges structure rather than code quality.
+- **Truncation:** for very large repos, later parts of the README and file tree are not seen.
+  GitHub may also truncate the tree for huge repos (shown as a note in the dashboard).
+- **LLM output can be wrong:** recommendations are suggestions grounded in the data
+  provided, but they should be checked before acting on them.
+- **Good first issues** depend on the repo using the exact `good first issue` label.
+- **Shared rate limit:** without a token, all users of the deployed app share the server's
+  60 requests/hour, which is why the sidebar token field exists.
+- **Groq free-tier limits** apply (requests/tokens per minute); a burst of analyses can
+  briefly fail with an "AI analysis failed" message while the GitHub stats still load.
 
 ## Run locally
 ```bash
