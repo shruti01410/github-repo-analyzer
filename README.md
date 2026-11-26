@@ -39,7 +39,7 @@ tests/            Unit tests (parser, error handling, truncation, normalisation)
 3. `analyzer.build_prompt()` packs the data into a prompt, truncated to stay inside the
    model's limits: README → first 6,000 chars, tree → first 200 paths, package files →
    4,000 chars total.
-4. Groq (`llama-3.3-70b-versatile`) is called in JSON mode. `normalize()` coerces the
+4. Groq (`openai/gpt-oss-120b` by default, overridable via `GROQ_MODEL`) is called in JSON mode. `normalize()` coerces the
    response into a fixed schema so the UI never breaks on slightly malformed output.
 5. Results are cached (`st.cache_data`): GitHub data for 10 minutes, AI reports per
    `repo + last push` for 1 hour, so reruns don't burn rate limit or tokens.

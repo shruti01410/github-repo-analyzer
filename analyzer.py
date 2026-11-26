@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 
 from groq import Groq
 
 from github_client import RepoData
 
-MODEL = "llama-3.3-70b-versatile"
+# Override with the GROQ_MODEL env var / secret if Groq retires this model.
+MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 README_CHARS = 6000
 TREE_PATHS = 200
 PACKAGE_CHARS_TOTAL = 4000
@@ -114,7 +116,8 @@ def analyze(data: RepoData, api_key: str) -> dict:
                 {"role": "user", "content": build_prompt(data)},
             ],
             temperature=0.3,
-            max_tokens=2500,
+            max_tokens=8000,  # reasoning model: leave room for thinking + JSON
+            reasoning_effort="low",
             response_format={"type": "json_object"},
         )
     except Exception as exc:  # groq raises several SDK-specific types
