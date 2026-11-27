@@ -1,117 +1,97 @@
 # GitHub Repository AI Analyzer
 
-Paste a GitHub repo link (`https://github.com/owner/repo` or `owner/repo`) and get an
-AI-generated report: what the project does, its tech stack, strengths, architecture,
-at least 3 actionable recommendations, and where to start contributing.
+Paste any GitHub repo (`https://github.com/owner/repo` or just `owner/repo`) and get a quick AI report: what the project does, its tech stack, strengths, at least 3 practical improvement ideas, and where a new contributor could start.
 
-**Live demo:** _add your Streamlit Cloud URL here_
+**Live app:** https://app-repo-analyzer-it396haccgjo8ijzcvafpe.streamlit.app/
 
-## Features
-- Stat cards: stars, forks, open issues, license, primary language
-- Charts: language breakdown (donut) and files per top-level folder (bar)
-- Tabs: Summary · Strengths & Architecture · Recommendations · Contribute · File Structure
-- Live "good first issue" list pulled from the repo
-- Optional GitHub token for higher rate limits and private repos
-- Friendly errors for invalid URLs, missing/private repos, rate limits, bad tokens and network failures
+![Dashboard for pallets/flask: stats, language chart and files per folder](docs/screenshot-dashboard.png)
 
-## Project layout
+![AI recommendations tab for pallets/flask](docs/screenshot-recommendations.png)
+
+## What you get
+
+- **Stats:** stars, forks, open issues, license and main language
+- **Charts:** language breakdown and number of files per top-level folder
+- **Tabs:** Summary · Strengths & Architecture · Recommendations · Contribute · File Structure
+- **"Good first issue" list** pulled live from the repo
+- **Clear error messages** for bad links, private or missing repos, rate limits, bad tokens and network problems
+
+## How it works
+
 ```
-app.py            Streamlit dashboard (UI + error messages)
-github_client.py  All GitHub REST API calls, URL parsing, error types
-analyzer.py       Prompt building, truncation, Groq call, JSON normalisation
-tests/            Unit tests (parser, error handling, truncation, normalisation)
+your input → parse owner/repo → fetch data from GitHub → build prompt → Groq LLM → dashboard
 ```
 
-## Architecture
+1. **Parse:** a regex extracts `owner/repo`. Full URLs, `.git` endings and deep links like `/tree/main/src` all work.
+2. **Fetch:** the app calls the GitHub REST API for:
+   - repo info: `/repos/{owner}/{repo}`
+   - README: `/readme`
+   - file tree: `/git/trees/{branch}?recursive=1`
+   - languages: `/languages`
+   - package files (`requirements.txt`, `pyproject.toml`, `package.json`, …), only if they exist in the tree
+   - good first issues: `/issues?labels=good first issue`
+3. **Trim:** to stay within the model's limits, the prompt gets the first 6,000 characters of the README, the first 200 file paths and up to 4,000 characters of package files.
+4. **Analyze:** Groq (`openai/gpt-oss-120b`) runs in **JSON mode**, and the reply is normalized into a fixed shape, so a slightly off response can't break the page.
+5. **Cache:** GitHub data is kept for 10 minutes and AI reports for 1 hour, so refreshing doesn't waste API calls.
+
+The code is split into three layers that don't depend on each other's details:
+
 ```
- user input ──► parse_repo() ──► GitHubClient.fetch_repo() ──► RepoData
-                (regex)          (requests, GitHub REST v3)     (dataclass)
-                                                                   │
-        Streamlit dashboard ◄── normalize() ◄── Groq LLM ◄── build_prompt()
-        (cards, charts, tabs)   (fixed schema)  (JSON mode)  (truncated context)
+github_client.py  GitHub API calls, URL parsing, error types   (knows nothing about UI or AI)
+analyzer.py       Prompt building, trimming, Groq call, JSON cleanup
+app.py            Streamlit dashboard; turns errors into friendly messages
+tests/            Unit tests with mocked HTTP (no network or keys needed)
 ```
-The three layers are kept separate on purpose: `github_client.py` knows nothing about
-the UI or the LLM, `analyzer.py` only sees the `RepoData` dataclass, and `app.py` only
-deals with presentation and turning exceptions into messages. That makes each layer
-testable on its own (the tests mock HTTP responses; no network or API key needed).
-
-## Model choice
-Groq's free tier is fast (a full report takes about 5 seconds), and its OpenAI-compatible API supports
-**JSON mode**, which the dashboard relies on to render each section separately.
-The default model is `openai/gpt-oss-120b`: it follows the output schema reliably and has a
-131k context window, so the truncated prompt fits with lots of headroom. It runs with
-`reasoning_effort="low"` to keep latency down. The model is set by the `GROQ_MODEL` setting:
-the first model I used (`llama-3.3-70b-versatile`) was retired by Groq during development,
-so I made it configurable rather than hard-coded.
-
-## API flow
-1. `parse_repo()` extracts `owner`/`repo` with a regex (also accepts `.git` suffixes and deep links like `/tree/main/src`).
-2. `GitHubClient.fetch_repo()` calls:
-
-| Data | Endpoint |
-|---|---|
-| Metadata | `GET /repos/{owner}/{repo}` |
-| README | `GET /repos/{owner}/{repo}/readme` (base64-decoded) |
-| File tree | `GET /repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1` |
-| Languages | `GET /repos/{owner}/{repo}/languages` |
-| Package files | `GET /repos/{owner}/{repo}/contents/{requirements.txt, pyproject.toml, package.json, ...}` |
-| Good first issues | `GET /repos/{owner}/{repo}/issues?labels=good first issue` |
-
-   Package files are only requested if the tree shows they exist, which saves requests.
-3. `analyzer.build_prompt()` packs the data into a prompt, truncated to stay inside the
-   model's limits: README → first 6,000 chars, tree → first 200 paths, package files →
-   4,000 chars total.
-4. Groq (`openai/gpt-oss-120b` by default, overridable via `GROQ_MODEL`) is called in JSON mode. `normalize()` coerces the
-   response into a fixed schema so the UI never breaks on slightly malformed output.
-5. Results are cached (`st.cache_data`): GitHub data for 10 minutes, AI reports per
-   `repo + last push` for 1 hour, so reruns don't burn rate limit or tokens.
-
-## Error handling
-| Situation | Behaviour |
-|---|---|
-| Input doesn't parse | "Please enter a valid GitHub URL or owner/repo." |
-| 404 on metadata | "Repo not found, or it's private." (suggests adding a token) |
-| 403/429 with `X-RateLimit-Remaining: 0` | "Rate limit reached…" plus the reset time from `X-RateLimit-Reset` |
-| 401 | "GitHub rejected the token." |
-| Timeout / connection error | "Couldn't reach GitHub. Please retry." |
-| Missing README / package file / empty repo (409) | Skipped quietly; the report still runs |
-| LLM failure or invalid JSON | Error shown; GitHub stats and charts still display |
 
 ## Rate limits
-Unauthenticated: **60 requests/hour** per IP. With a personal access token:
-**5,000 requests/hour**. One analysis uses roughly 6–10 requests. The remaining quota is
-shown under the stat cards. Users can paste a token in the sidebar (it is only kept
-in memory for the session); a server-side `GITHUB_TOKEN` secret is used as a fallback.
 
-## Limitations
-- **Static view only:** the AI sees the README, the first 200 file paths and package files,
-  not the source code itself, so it judges structure rather than code quality.
-- **Truncation:** for very large repos, later parts of the README and file tree are not seen.
-  GitHub may also truncate the tree for huge repos (shown as a note in the dashboard).
-- **LLM output can be wrong:** recommendations are suggestions grounded in the data
-  provided, but they should be checked before acting on them.
-- **Good first issues** depend on the repo using the exact `good first issue` label.
-- **Shared rate limit:** without a token, all users of the deployed app share the server's
-  60 requests/hour, which is why the sidebar token field exists.
-- **Groq free-tier limits** apply (requests/tokens per minute); a burst of analyses can
-  briefly fail with an "AI analysis failed" message while the GitHub stats still load.
+Without a token, GitHub allows **60 requests/hour** per IP, and one analysis uses about 6–10. You can paste a personal access token in the sidebar for **5,000/hour**. It's kept only in your session and never stored. The app shows how many requests are left, and if you run out it tells you when the limit resets.
 
-## Run locally
+## Why Groq + `gpt-oss-120b`
+
+It's fast (a full report takes about 5 seconds), free to start with, and supports JSON mode, which the dashboard needs to fill each tab. The model follows the output format reliably and has a 131k context window. It runs with `reasoning_effort="low"` to stay quick. The model can be changed with `GROQ_MODEL`. I made it configurable after Groq retired the model I started with (`llama-3.3-70b-versatile`) during development.
+
+## Run it locally
+
+You need Python 3.10+ and a free [Groq API key](https://console.groq.com/keys).
+
 ```bash
+git clone https://github.com/shruti01410/github-repo-analyzer.git
+cd github-repo-analyzer
+
 python -m venv .venv
-.venv\Scripts\activate          # Windows  (macOS/Linux: source .venv/bin/activate)
+.venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
+
 pip install -r requirements.txt
-copy .env.example .env          # then fill in GROQ_API_KEY
+copy .env.example .env            # macOS/Linux: cp .env.example .env
+# open .env and paste your GROQ_API_KEY (GITHUB_TOKEN is optional)
+
 streamlit run app.py
 ```
-Tests: `pip install pytest && pytest -q`
 
-## Deploy (Streamlit Community Cloud)
-1. Push this repo to GitHub.
-2. On share.streamlit.io → New app → pick the repo, main file `app.py`.
-3. In **Settings → Secrets** add:
-   ```toml
-   GROQ_API_KEY = "gsk_..."
-   GITHUB_TOKEN = ""   # optional
-   ```
-No secrets are committed: `.env` and `.streamlit/secrets.toml` are git-ignored.
+Run the tests with `pip install pytest` and then `pytest -q`.
+
+**Deploying on Streamlit Cloud:** main file `app.py`. Under **Secrets**, add `GROQ_API_KEY = "gsk_..."` and optionally `GITHUB_TOKEN`. `.env` and `secrets.toml` are git-ignored.
+
+## Limitations
+
+- **It reads structure, not code.** The AI sees the README, file paths and package files, not the source itself.
+- **Big repos are trimmed,** so later parts of a long README or file tree are skipped.
+- **AI suggestions can be wrong.** Treat them as ideas to check, not facts.
+- **Good first issues** only appear if the repo uses that exact label.
+- **Shared limit:** without a token, everyone using the live app shares its 60 requests/hour.
+
+## Open-source contribution
+
+As part of this task I contributed a bug fix to **[databrickslabs/dqx](https://github.com/databrickslabs/dqx)**, Databricks Labs' data-quality framework.
+
+- **Issue:** [#1747: MCP `get_table_schema` returns an empty schema when `DESCRIBE TABLE` returns no rows](https://github.com/databrickslabs/dqx/issues/1747)
+- **Pull request:** [#1766: Raise a clear error when MCP get_table_schema finds no columns](https://github.com/databrickslabs/dqx/pull/1766)
+
+**The problem:** some SQL warehouses answer `DESCRIBE TABLE` successfully but return no rows. The MCP tool then reported a table with zero columns, and an AI agent using it would carry on with the wrong schema.
+
+**The fix:** the tool now raises a clear error naming the table when no columns are found. Normal tables behave exactly as before. I added two regression tests: an empty result, and a result containing only metadata rows. Both fail before the fix and pass after it, and the full MCP test suite (213 tests) passes. The commit is signed, as the project requires.
+
+## Tech stack
+
+Python · Streamlit · GitHub REST API (`requests`) · Groq API (JSON mode) · Plotly · pandas · pytest
